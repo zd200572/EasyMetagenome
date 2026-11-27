@@ -633,6 +633,68 @@
     # usually in ~/miniconda3/envs/metawrap/bin/config-metawrap
     # Using Rstudio/vim to set database location
 
+## 4.1.2 (Opt) MetaWrap2 binning (可选)MetaWrap2分箱(含SemiBin2+VAMB+CheckM2)
+
+    # GitHub: https://github.com/ursky/MetaWrap2
+    # Docs: https://github.com/ursky/MetaWrap2/blob/main/docs/installation.md
+    # Requires Python 3.10-3.14 and mamba; minimal install only builds 3-4 envs instead of all 16
+    # 需Python 3.10-3.14与mamba；按模块精简安装，仅构建分箱和质控所需的3~4个隔离环境
+    s=metawrap2
+    conda create -y -n ${s} -c conda-forge python=3.11 mamba git pip
+    conda activate ${s}
+
+    # Install MetaWrap2 core (安装主程序，同时提供 metawrap2 和 mw2 命令)
+    git clone https://github.com/ursky/MetaWrap2.git ${soft}/MetaWrap2
+    pip install ${soft}/MetaWrap2
+    metawrap2 -v
+
+    # Build only required environments (仅安装分箱+深度学习+CheckM2所需环境)
+    metawrap2 install-env bins      # metaBAT2, minimap2, coverage
+    metawrap2 install-env learned   # SemiBin2, VAMB, COMEBin (ships CUDA-capable PyTorch)
+    metawrap2 install-env checkm2   # CheckM2 default bin scorer
+    # Optional: needed for GUNC chimera check or --consolidator dastool
+    # 可选：若启用GUNC嵌合体检测或DAS Tool提纯，再安装binqc环境
+    metawrap2 install-env binqc
+
+    # Databases (数据库，CheckM2约1.7GB；GUNC约6.7GB，跳过GUNC则无需下载)
+    metawrap2 install-db checkm2
+    # metawrap2 install-db gunc
+
+    # Verify environments and databases (自检环境与数据库状态)
+    metawrap2 doctor
+    conda deactivate
+
+## 4.1.3 (Opt) SemiBin2 standalone binning (可选)SemiBin2独立分箱
+
+    # GitHub: https://github.com/BigDataBiology/SemiBin
+    # Docs: https://semibin.readthedocs.io/en/v2.2.0/usage/
+    # Python >=3.11 required; GPU optional (auto-detected, falls back to CPU)
+    # 需Python>=3.11；自动检测GPU，无GPU时自动回退CPU运行
+    s=semibin2
+    conda create -y -n ${s} -c conda-forge -c bioconda python=3.11 semibin minimap2 samtools
+    conda activate ${s}
+    SemiBin2 --version # >=2.6.1
+    SemiBin2 check_install
+    # Optional GPU acceleration (可选GPU加速安装):
+    # conda install -y -c conda-forge pytorch-gpu
+    conda deactivate
+
+## 4.1.4 (Opt) VAMB standalone binning (可选)VAMB独立分箱
+
+    # GitHub: https://github.com/RasmussenLab/vamb
+    # Docs: https://vamb.readthedocs.io/en/latest/
+    s=vamb
+    conda create -y -n ${s} -c conda-forge -c bioconda python=3.11 vamb strobealign minimap2 samtools
+    conda activate ${s}
+    vamb --version
+    # Optional: download VAMB helper script for strobealign abundance merging
+    # 可选：下载VAMB辅助脚本用于strobealign丰度合并
+    mkdir -p ${db}/vamb
+    wget -c -O ${db}/vamb/merge_aemb.py https://raw.githubusercontent.com/RasmussenLab/vamb/master/src/merge_aemb.py
+    # Optional TaxVamb dependency (可选TaxVamb物种注释依赖):
+    # conda install -y -c bioconda mmseqs2
+    conda deactivate
+
 ## 4.2 dRep genome redundance (基因组去冗余)
 
     # GitHub: https://github.com/MrOlm/drep

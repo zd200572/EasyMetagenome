@@ -1135,10 +1135,193 @@
     rename "s/bin./Gp_${g}_/" temp/drep_in/bin.* # Ubuntu
     rename 'bin.' "Gp_${g}_" temp/drep_in/bin.* # CentOS
 
+### (Opt) MetaWrap2 binning: metaBAT2 + SemiBin2 + VAMB (可选)MetaWrap2分箱与CheckM2提纯
+
+    # GitHub: https://github.com/ursky/MetaWrap2
+    # Docs: https://github.com/ursky/MetaWrap2/blob/main/docs/modules.md
+    cd $wd
+    conda activate metawrap2
+    p=16
+    c=50
+    x=10
+    mkdir -p temp/mw2_bin temp/mw2_bin_refine temp/drep_in result/bin
+
+    #### 1) All samples mix binning (多样本混合分箱)
+    # --device auto uses GPU for SemiBin2/VAMB if available, otherwise falls back to CPU
+    # --device auto 自动检测GPU加速SemiBin2和VAMB，无卡时回退CPU；支持 --resume 断点续跑
+    time metawrap2 binning \
+      -o temp/mw2_bin/all \
+      -t ${p} \
+      -a temp/megahit/final.contigs.fa \
+      --metabat2 --semibin2 --vamb \
+      --device auto \
+      temp/hr/*.fastq
+    # Optional: --preset default (metaBAT2+SemiBin2) or --preset deep (metaBAT2+SemiBin2+COMEBin, needs GPU)
+
+    # Bin refinement with CheckM2 (CheckM2分箱提纯，自动合并并集/差集/交集)
+    # Remove --skip-gunc if GUNC database is installed for chimera flagging
+    # 如已安装GUNC数据库，删去 --skip-gunc 即可自动标记嵌合体
+    time metawrap2 bin_refinement \
+      -o temp/mw2_bin_refine/all \
+      -t ${p} \
+      -b temp/mw2_bin/all/metabat2_bins,temp/mw2_bin/all/semibin2_bins,temp/mw2_bin/all/vamb_bins \
+      -c ${c} -x ${x} \
+      --skip-gunc
+    # Optional faster consolidator (可选DAS Tool快速提纯): add --consolidator dastool -a temp/megahit/final.contigs.fa
+
+    tail -n+2 temp/mw2_bin_refine/all/metawrap_${c}_${x}_bins.stats.tsv | wc -l
+
+    # Link & rename (*.fasta -> MW2_All_*.fa) into temp/drep_in/ for dRep
+    for f in `pwd`/temp/mw2_bin_refine/all/metawrap_${c}_${x}_bins/*.fasta; do
+        [ -e "$f" ] || continue
+        b=`basename "$f" .fasta`
+        ln -sf "$f" temp/drep_in/MW2_All_${b}.fa
+    done
+    ls temp/drep_in/MW2_All_*.fa 2>/dev/null | wc -l
+
+    #### 2) (Opt) Single sample binning (可选：单样本分箱)
+    # Note: keep j=1 when using GPU (--device auto/cuda) to avoid VRAM contention
+    j=1
+    time tail -n+2 result/metadata.txt | cut -f1 | rush -j ${j} \
+      "metawrap2 binning \
+        -o temp/mw2_bin/{} -t ${p} \
+        -a temp/megahit/{}/final_assembly.fasta \
+        --metabat2 --semibin2 --vamb \
+        --device auto \
+        temp/hr/{}_1.fastq temp/hr/{}_2.fastq"
+
+    time tail -n+2 result/metadata.txt | cut -f1 | rush -j ${j} \
+      "metawrap2 bin_refinement \
+        -o temp/mw2_bin_refine/{} -t ${p} \
+        -b temp/mw2_bin/{}/metabat2_bins,temp/mw2_bin/{}/semibin2_bins,temp/mw2_bin/{}/vamb_bins \
+        -c ${c} -x ${x} \
+        --skip-gunc"
+
+    for i in `tail -n+2 result/metadata.txt | cut -f1`; do
+        for f in `pwd`/temp/mw2_bin_refine/${i}/metawrap_${c}_${x}_bins/*.fasta; do
+            [ -e "$f" ] || continue
+            b=`basename "$f" .fasta`
+            ln -sf "$f" temp/drep_in/MW2_${i}_${b}.fa
+        done
+    done
+    ls temp/drep_in/MW2_*.fa 2>/dev/null | wc -l
+
+
+### (Opt) Shared prep for standalone SemiBin2 & VAMB (可选)独立深度学习分箱公共拼接与比对
+
+    # Prerequisite: single-sample assemblies in temp/megahit/{sample}/final_assembly.fasta
+    cd $wd
+    conda activate semibin2
+    p=16
+    j=3
+    mkdir -p temp/bin_prep/asm temp/bin_prep/concat temp/bin_prep/bam
+
+    # 1. Symlink single-sample assemblies using sample IDs as filenames
+    for i in `tail -n+2 result/metadata.txt|cut -f1`; do
+        ln -sf `pwd`/temp/megahit/${i}/final_assembly.fasta temp/bin_prep/asm/${i}.fa
+    done
+
+    # 2. Concatenate assemblies with ':' separator (shared by SemiBin2 and VAMB -o :)
+    SemiBin2 concatenate_fasta \
+      --input-fasta temp/bin_prep/asm/*.fa \
+      --output temp/bin_prep/concat \
+      --separator ':'
+
+    # 3. Map clean reads to concatenated contigs -> sorted BAMs
+    minimap2 -d temp/bin_prep/concat/concatenated.mmi temp/bin_prep/concat/concatenated.fa.gz
+    time tail -n+2 result/metadata.txt|cut -f1|rush -j ${j} \
+      "minimap2 -t ${p} -ax sr temp/bin_prep/concat/concatenated.mmi \
+        temp/hr/{}_1.fastq temp/hr/{}_2.fastq \
+      | samtools view -F 3584 -b - \
+      | samtools sort -@ 4 -o temp/bin_prep/bam/{}.sorted.bam - \
+      && samtools index temp/bin_prep/bam/{}.sorted.bam"
+
+
+### (Opt) SemiBin2 standalone binning (可选)SemiBin2独立分箱
+
+    # GitHub: https://github.com/BigDataBiology/SemiBin
+    cd $wd
+    conda activate semibin2
+    mkdir -p temp/semibin2/multi temp/semibin2/mix temp/drep_in
+
+    # Branch A (Recommended): Multi-sample binning (多样本联合分箱)
+    time SemiBin2 multi_easy_bin \
+      -i temp/bin_prep/concat/concatenated.fa.gz \
+      -b temp/bin_prep/bam/*.sorted.bam \
+      -o temp/semibin2/multi \
+      --separator ':' \
+      --compression none \
+      -t ${p}
+    # Optional flags: --engine gpu | --sequencing-type long_read
+
+    # Branch B (Alternative): Co-assembly or single-sample binning (混装/单样本分箱)
+    # Single-sample mode supports --environment human_gut (or soil, ocean, pig_gut, global)
+    # SemiBin2 single_easy_bin \
+    #   -i temp/megahit/final.contigs.fa \
+    #   -b temp/bin_prep/bam_mix/*.sorted.bam \
+    #   -o temp/semibin2/mix \
+    #   --compression none \
+    #   -t ${p}
+
+    for f in `pwd`/temp/semibin2/multi/output_bins/*.fa; do
+        [ -e "$f" ] || continue
+        b=`basename "$f"`
+        ln -sf "$f" temp/drep_in/SB2_${b}
+    done
+    ls temp/drep_in/SB2_* 2>/dev/null | wc -l
+
+
+### (Opt) VAMB standalone binning (可选)VAMB独立分箱
+
+    # GitHub: https://github.com/RasmussenLab/vamb
+    cd $wd
+    conda activate vamb
+    mkdir -p temp/vamb temp/drep_in
+
+    # Branch A (Shared BAM): Reuse temp/bin_prep/bam/ with ':' binsplitting separator
+    /bin/rm -rf temp/vamb/multi
+    time vamb bin default \
+      --outdir temp/vamb/multi \
+      --fasta temp/bin_prep/concat/concatenated.fa.gz \
+      --bamdir temp/bin_prep/bam \
+      -o ':' \
+      --minfasta 200000 \
+      -p ${p}
+    # Optional GPU flag: add --cuda
+
+    # Branch B (Fast path without BAM): strobealign --aemb + merge_aemb.py
+    # mkdir -p temp/vamb/aemb
+    # tail -n+2 result/metadata.txt|cut -f1|rush -j ${j} \
+    #   "strobealign -t ${p} --aemb temp/bin_prep/concat/concatenated.fa.gz \
+    #     temp/hr/{}_1.fastq temp/hr/{}_2.fastq > temp/vamb/aemb/{}.tsv"
+    # python ${db}/vamb/merge_aemb.py temp/vamb/aemb temp/vamb/abundance.tsv
+    # /bin/rm -rf temp/vamb/multi_aemb
+    # vamb bin default \
+    #   --outdir temp/vamb/multi_aemb \
+    #   --fasta temp/bin_prep/concat/concatenated.fa.gz \
+    #   --abundance_tsv temp/vamb/abundance.tsv \
+    #   -o ':' --minfasta 200000 -p ${p}
+
+    # Branch C (Semi-supervised TaxVamb): Requires MMseqs2 taxonomy TSV
+    # /bin/rm -rf temp/vamb/taxvamb
+    # vamb bin taxvamb \
+    #   --outdir temp/vamb/taxvamb \
+    #   --fasta temp/bin_prep/concat/concatenated.fa.gz \
+    #   --abundance_tsv temp/vamb/abundance.tsv \
+    #   --taxonomy temp/vamb/taxonomy.tsv \
+    #   -o ':' --minfasta 200000 -p ${p}
+
+    for f in `pwd`/temp/vamb/multi/bins/*.fna; do
+        [ -e "$f" ] || continue
+        b=`basename "$f" .fna`
+        ln -sf "$f" temp/drep_in/VAMB_${b}.fa
+    done
+    ls temp/drep_in/VAMB_* 2>/dev/null | wc -l
+
     # Stat each type and sample
     echo -e "Type\tCount" > result/bin/count.txt
-    ls temp/drep_in/|cut -f 1 -d '_'|uniq -c|awk '{print $2"\t"$1}' >> result/bin/count.txt
-    ls temp/drep_in/|cut -f 1-2 -d '_'|uniq -c|awk '{print $2"\t"$1}' >> result/bin/count.txt
+    ls temp/drep_in/|cut -f 1 -d '_'|sort|uniq -c|awk '{print $2"\t"$1}' >> result/bin/count.txt
+    ls temp/drep_in/|cut -f 1-2 -d '_'|sort|uniq -c|awk '{print $2"\t"$1}' >> result/bin/count.txt
     cat result/bin/count.txt
 
 ## 4.2 dRep genome redundance (基因组去冗余)
